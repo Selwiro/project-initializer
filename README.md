@@ -1,41 +1,49 @@
 # project-initializer
 
-面向 AI 编程助手的项目初始化与任务管理技能。它帮助新项目或已有项目建立入口和任务索引，跟踪需求、执行结果、搁置事项，以及结项和重启。
+**用 Codex 初始化项目、记录任务，换个会话也能接着做。**
 
-## 通用初始化与专项规定
+这是一个适用于编程、写作、AI 视频等项目的技能。新项目可以用它整理目标、文件位置和第一项任务。已有项目可以沿用原来的文件和任务记录，补齐缺少的说明。
 
-项目初始化适用于各类新项目，也可用于接入已有项目。通用流程包括明确目标、范围与验收条件，建立或补齐项目入口和任务索引，并在下一步明确时登记首项任务。接入已有项目时沿用现有工程位置和任务记录。[通用项目初始化规范](references/Project_Initialization.md)
+## 用 Codex 开始
 
-以下类型在通用流程上补充专项规定。其他类型可直接使用通用流程，混合项目可按各工作内容组合适用的规定。
-
-- **编程项目**。新工程在 `work/` 下按平台或用途建立独立目录，并明确 Git 仓库位置和推送范围。[编程项目文件与 Git 管理](references/Programming_Project_File_Management.md)
-- **写作项目（编剧、小说）**。单一写作项目可直接在 `work/` 维护主稿和大纲，按需以场次或章节组织稿件并记录审阅版本。[写作项目文件管理](references/Writing_Project_File_Management.md)
-- **AI 视频项目**。按制作阶段组织策划、资产和镜头文件，并记录素材来源和版本。[AI 视频项目文件管理](references/AI_Video_Project_File_Management_v2.md)
-
-## 安装
-
-以 Codex 为例，从终端安装到个人技能目录。进入要管理的项目后，可在 Codex 中输入「用 $project-initializer 初始化当前项目」。
+**1. 安装技能。** 在终端运行以下命令。需要 Git 和 Python 3.10 或更高版本。
 
 ```sh
 mkdir -p ~/.agents/skills
 git clone https://github.com/Selwiro/project-initializer.git ~/.agents/skills/project-initializer
 ```
 
-已经用上面的方法安装时，可用以下命令更新。
+**2. 在 Codex 里打开你的项目文件夹。** 新项目可以先建一个空文件夹。把下面这句话发给 Codex，把例子换成自己的目标。
+
+> 用 `$project-initializer` 初始化当前项目。我想做一个记账应用，第一版能记录支出并查看每月合计。请帮我写清第一版的范围和完成条件，再登记第一项任务。
+
+已有项目可以说「用 `$project-initializer` 接入当前项目，沿用现有文件和任务记录」。
+
+**3. 继续做任务。** Codex 会建立或补齐项目说明和任务清单。在同一个项目里，可以用下面这些指令继续。
+
+- 「执行 T001，完成后记录结果和验证方式。」
+- 「现在做到哪了？下一步做什么？」
+- 「把 T002 暂缓，等拿到素材后再继续。」
+
+## 搭配 agent-kanban 使用
+
+想在网页上查看多个项目的进度，可以搭配 [agent-kanban](https://github.com/Selwiro/agent-kanban)。技能负责在项目里建立和更新任务记录，看板读取同一份记录。
+
+1. 用本技能初始化或接入项目后，在看板点「选择项目目录」，打开含有 `management/project.json` 的项目文件夹，勾选「选择当前目录」，再点「扫描并加入」。
+2. 在看板查看进度或新建任务。拿到任务编号后，回到该项目的 Codex 会话，告诉它要执行哪一项。
+3. Codex 写回执行结果后，在看板点「刷新数据」查看。
+
+## 更新与终端试用
+
+按上面的方式安装过，可以在终端更新。
 
 ```sh
 git -C ~/.agents/skills/project-initializer pull --ff-only
 ```
 
-其他兼容 [SKILL.md](SKILL.md) 的助手可按各自的技能目录约定放置整个仓库。
+其他支持 [SKILL.md](SKILL.md) 的 AI 助手，可把整个仓库放进各自的技能目录。
 
-## 使用
-
-- 初始化当前项目，沿用已有的 README、工程路径和任务记录。
-- 把具体项目需求登记为任务，按验收条件验证并回写任务状态。
-- 结项时选择原地归档、同级 `_Archive` 或自定义位置。
-
-本地命令需要 Python 3.10 或更高版本，使用 Python 标准库。请先用 `python3 --version` 检查版本。以下示例在技能仓库根目录运行，用随附的演示账本计划创建临时项目。
+想先看看初始化会生成什么，可以在技能仓库根目录运行下面的示例。它会在临时目录建立一个演示账本，并显示项目进度和第一项任务。
 
 ```sh
 demo_dir=$(mktemp -d)
@@ -45,14 +53,16 @@ python3 scripts/project_init.py status "$demo_dir"
 python3 scripts/project_init.py task "$demo_dir" T001
 ```
 
-管理真实项目时，先按[初始化流程](references/Project_Initialization.md#初始化或接入的操作步骤)准备项目自己的计划。
+用终端初始化真实项目时，先为该项目准备计划文件。[初始化步骤](references/Project_Initialization.md#初始化或接入的操作步骤)
 
-## 搭配 agent-kanban 使用
+## 参考文档
 
-用本技能初始化或接入项目后，可以在 [agent-kanban](https://github.com/Selwiro/agent-kanban) 中导入包含 `management/project.json` 的项目目录，在网页上查看进度或新建任务。把任务编号交给对应项目的 AI 助手，待助手写回执行结果后，点击看板上的「刷新数据」查看。
-
-字段和操作约定见[看板接口文档](references/Project_Dashboard_Interface.md)。
+- [项目初始化、接入、结项和重启](references/Project_Initialization.md)
+- [编程项目的目录与 Git 管理](references/Programming_Project_File_Management.md)
+- [剧本和小说的文件管理](references/Writing_Project_File_Management.md)
+- [AI 视频的策划、素材与镜头管理](references/AI_Video_Project_File_Management_v2.md)
+- [任务记录和看板接口](references/Project_Dashboard_Interface.md)
 
 ## 许可证
 
-见 [LICENSE](LICENSE)。
+[MIT](LICENSE)

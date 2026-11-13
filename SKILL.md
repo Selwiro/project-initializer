@@ -1,38 +1,14 @@
 ---
 name: project-initializer
-description: 初始化或接入项目、检查项目结构、登记用户提出的项目需求并跟踪执行与看板回写、登记搁置事项，以及办理项目结项、归档迁移和重启。
+description: 初始化或接入项目、登记需求并回写看板、查询进度、搁置或恢复任务，以及办理结项、迁移和重启。
 ---
 
-# 项目初始化
+# 项目初始化与任务跟踪
 
-## 选择流程
+从项目入口和 `management/project.json` 确认项目。以下命令使用技能包的 `scripts/project_init.py`。查进度用 `status <项目目录>`，核对结构用 `inspect`，只查一个任务的状态用 `task <项目目录> <ID> --metadata-only`。执行任务时再读取该任务详情。
 
-- **检查项目结构**：只读检查已指定项目，报告入口、工程、任务索引、冲突和缺项。
-- **初始化或接入**：按下面步骤补齐项目。识别空目录、已有项目和已接入项目，使用同一脚本验证和应用。初始化到首项任务登记为止。
-- **收到具体项目需求**：在实施前按[从项目会话登记需求](references/Project_Dashboard_Interface.md#从项目会话登记需求)创建或定位任务。明确要求执行时，登记后直接开始；要求先登记时保留为待办。用户补充同一需求时继续更新原任务。
-- **执行任务号**：按下文的任务执行流程处理。项目内唯一的是任务 ID，跨项目时同时确认项目。
-- **搁置或暂缓事项**：用户对具体项目事项说「先不处理」「搁置」或「暂缓」时，当轮按[搁置与看板登记](references/Project_Dashboard_Interface.md#搁置与看板登记)保存原因和恢复条件，并验证索引与任务详情都可读。已有任务沿用 ID，讨论中尚未编号的事项登记为阻塞。
-- **结项或迁移**：按[结项、迁移与重启约定](references/Project_Initialization.md#结项迁移与重启)补齐结项记录。归档位置由用户选原地保留、同级 `_Archive` 或自定义目录，用户已给定时直接复用。
-- **重启项目**：收到已结项项目的实际修改请求时，开始修改前恢复为 `active`，阶段写「项目重启」。发现已发生实质改动时补记重启。只读检查和归档整理沿用结项状态。
+- **初始化或接入**。按[初始化流程](references/Project_Initialization.md#初始化或接入的操作步骤)使用计划样例。根据实际类型选读相关章节：[编程](references/Programming_Project_File_Management.md)、[写作](references/Writing_Project_File_Management.md)、[AI 视频](references/AI_Video_Project_File_Management_v2.md)。
+- **登记、执行、搁置或恢复**。按[任务流程](references/Project_Dashboard_Interface.md#三agent-怎样执行并回写)先登记具体需求，再按授权执行。追加同一需求沿用任务 ID。状态和结果写回正式任务来源，并复读索引和详情。单纯状态查询沿用现有任务记录。
+- **结项、迁移或重启**。按[结项约定](references/Project_Initialization.md#结项迁移与重启)保留原记录。归档位置由用户选择，已结项项目继续实质工作前先重启。
 
-## 初始化或接入
-
-1. 确认用户指定的项目根目录。在其范围内查看 README、已有管理文件、工程入口及 Git 根和远端。区分项目管理根和 Git 根。用户已提供的信息直接复用，只追问会影响开工的项目类型、目标、本轮范围、输入或验收条件。方向未定时，可把调研设为首项任务，也可保留空任务列表与 null 下一项。
-2. 选择实际管理入口。新项目使用 README.md。已有 README 已适合作为入口时，保留其结构，可按需补导航；若是产品介绍或管理信息不适合放入，用 management/overview.md。已有有效 entry_path 继续沿用。已有 AGENTS.md 保留原文，只在确有长期协作规则时补充。
-3. 保护已有项目。沿用工作文件、Git 历史、项目 ID、已有任务及其状态。公开仓库的管理文件放在仓库外。使用已获准、能同时包含管理文件与工程的外层项目目录；如果工程不在该目录下，明确新的工作区边界再登记，避免创建越界路径或移动仓库。外部任务系统继续维护正式记录；已接入可写看板时，通过其任务服务写入。
-4. 按需读取参考文件：
-   - [通用项目规范](references/Project_Initialization.md)
-   - [编程](references/Programming_Project_File_Management.md)：新工程用 work/android/、work/web/ 等二级目录。已有工程保留路径。先确认推送范围。
-   - [写作](references/Writing_Project_File_Management.md)：单一写作项目可直接用 work/。
-   - [AI 视频](references/AI_Video_Project_File_Management_v2.md)：按现阶段所需登记策划、资产或镜头位置。
-   - [看板接口](references/Project_Dashboard_Interface.md)：保留 v1 字段、任务状态和路径约定。
-5. 使用随附脚本。先运行 `python3 scripts/project_init.py inspect <项目目录>`。检查输出后，参考 [计划样例](assets/init-plan.json) 在临时目录准备 JSON，写入真实信息。用 `apply <项目目录> <计划文件> --dry-run` 预览，确认边界后去掉该参数应用。所有脚本路径相对 Skill 目录。已有公开仓库时在合适的外层目录应用，计划中的 target_path 使用外层相对路径。
-6. 核对入口和任务详情可打开，现有工作文件与任务状态得以保留。新编程工程按专题建立本地 Git 仓库。先确认目标没有已有仓库且不位于另一个 Git 工作树内，再在工程根运行初始化命令。项目入口登记运行方式和已确认的推送模式，未知时按本地流程。报告实际修改的文件、当前项目入口和下一项任务。正式交付、发布、推送按用户授权和各工程已有规则执行。
-
-## 执行任务号
-
-- 先通过 `python3 scripts/project_init.py task <项目目录> <任务ID>` 读取索引和本地详情，并读取入口和对应工程约定。外部详情走原工具。确认用户指定的任务可开始，依范围实现并验证。
-- 项目已结项时，按[重启约定](references/Project_Initialization.md#结项迁移与重启)恢复项目状态并记录本轮范围，再开始任务。
-- 可写任务服务已接入时，通过它开始、阻塞或完成，按服务约定使用 revision 与 run_id；外部系统管理时从其接口更新。
-- 尚未接入服务且本地索引是正式来源时，使用脚本的 `start <项目目录> <任务ID>` 领取待办，保存返回的 run_id。将实际执行结果写到临时 Markdown 文件，用 `finish <项目目录> <任务ID> <run_id> --record <记录文件>` 回写。遇到缺项，用 `block <项目目录> <任务ID> <run_id> --record <记录文件> --reason <原因>`。已有进行中任务先读取已有记录并确认可接手。
-- 完成记录包括改动、实际验证结果、输出路径和提交号（如有）。
+已接入任务服务或外部系统时通过正式来源写入。本地写入提示有待恢复记录时运行 `recover <项目目录>`。发现冲突时保留记录并核对两边的实际内容。

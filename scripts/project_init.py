@@ -4,16 +4,23 @@
 import argparse
 from contextlib import contextmanager
 from datetime import datetime
-import fcntl
 import json
 import os
 from pathlib import Path
+import posixpath
 import re
 import subprocess
 import tempfile
 from uuid import uuid4
 
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
+
 INDEX = "management/project.json"
+LOCK = "management/.project-init.lock"
+PENDING = "management/.project-init-pending.json"
 TASK_STATES = {"todo", "in_progress", "blocked", "done", "cancelled"}
 PROJECT_TYPES = {"programming", "writing", "ai_video", "other"}
 PROJECT_STATES = {"planned", "active", "paused", "completed", "cancelled"}
@@ -32,7 +39,11 @@ def path_in(root, value):
 
 
 def read_object(path):
-    data = json.loads(path.read_text(encoding="utf-8"))
+    return parse_object(path.read_text(encoding="utf-8"), path)
+
+
+def parse_object(body, path):
+    data = json.loads(body)
     if not isinstance(data, dict):
         raise ValueError(f"应为 JSON 对象：{path}")
     return data
@@ -59,20 +70,52 @@ def inspect(root):
             validate_index(root, data)
             if not path_in(root, data["entry_path"]).is_file():
                 issues.append(f"找不到项目入口：{data['entry_path']}")
+            details = {path_in(root, task["detail_path"]) for task in data["tasks"] if "detail_path" in task}
             for task in data["tasks"]:
-                for field in ("detail_path", "target_path"):
-                    if field in task and not path_in(root, task[field]).exists():
-                        issues.append(f"{task['id']} 找不到 {field}：{task[field]}")
+                for field, check in (("detail_path", Path.is_file), ("target_path", Path.is_dir)):
+                    if field in task and not check(path_in(root, task[field])):
+                        issues.append(f"{task['id']} 的 {field} 不存在或类型不符：{task[field]}")
+            for detail in sorted(path_in(root, "management/tasks").glob("T[0-9]*.md")):
+                if re.fullmatch(r"T\d+\.md", detail.name) and detail.resolve() not in details:
+                    issues.append(f"任务详情尚未登记到索引：{detail.relative_to(root)}")
         except (ValueError, OSError, KeyError, TypeError) as error:
             issues.append(str(error))
     else:
         issues.append(f"缺少看板索引：{INDEX}")
+    if path_in(root, PENDING).exists():
+        issues.append("有未完成的本地写入，可运行 recover 恢复。")
     return {
         "root": str(root),
         "git_root": git_root(root),
         "entries": sorted(p.name for p in root.iterdir() if p.name != ".DS_Store"),
         "index": data,
         "issues": issues,
+    }
+
+
+def project_status(root):
+    index = path_in(root, INDEX)
+    data = read_object(index)
+    validate_index(root, data)
+    tasks = data["tasks"]
+    next_id = data.get("next_task_id")
+    counts = {state: 0 for state in sorted(TASK_STATES)}
+    blocked = []
+    next_task = None
+    for task in tasks:
+        counts[task["status"]] += 1
+        if task["id"] == next_id:
+            next_task = {"id": task["id"], "title": task["title"][:160], "status": task["status"]}
+        if task["status"] == "blocked" and len(blocked) < 5:
+            blocked.append({
+                "id": task["id"], "title": task["title"][:160],
+                "reason": str(task.get("blocked_reason", ""))[:200],
+            })
+    return {
+        "project_id": data["project_id"], "name": data["name"], "summary": data["summary"][:500],
+        "status": data["status"], "stage": data["stage"], "entry_path": data["entry_path"],
+        "counts": counts, "next_task": next_task, "blocked": blocked,
+        "pending_write": path_in(root, PENDING).exists(),
     }
 
 
@@ -91,13 +134,13 @@ def task_body(task_id, task, target):
 
 
 def overview_body(data, entry, scope, acceptance, target, plan):
-    location = Path(entry).parent
-    index_link = os.path.relpath(INDEX, location)
-    target_link = os.path.relpath(target, location)
+    location = Path(entry).parent.as_posix()
+    index_link = posixpath.relpath(INDEX, location)
+    target_link = posixpath.relpath(Path(target).as_posix(), location)
     first_task = next((task for task in data["tasks"] if task["id"] == data["next_task_id"]), None)
     next_link = ""
     if first_task and "detail_path" in first_task:
-        detail = os.path.relpath(first_task["detail_path"], location)
+        detail = posixpath.relpath(Path(first_task["detail_path"]).as_posix(), location)
         next_link = f"\n\n接入时登记的任务 [{first_task['id']}]({detail})"
     engineering = ""
     if data["type"] == "programming":
@@ -117,7 +160,7 @@ def overview_body(data, entry, scope, acceptance, target, plan):
 def atomic_write(path, content):
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
-        mode="w", encoding="utf-8", dir=path.parent, delete=False,
+        mode="w", encoding="utf-8", newline="", dir=path.parent, delete=False,
     ) as handle:
         temp = Path(handle.name)
         try:
@@ -128,21 +171,68 @@ def atomic_write(path, content):
             temp.unlink(missing_ok=True)
 
 
-def save_index(path, data):
+def index_body(data):
     data["updated_at"] = now()
-    atomic_write(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+    return json.dumps(data, ensure_ascii=False, indent=2) + "\n"
 
 
-def save_task_detail(index, data, detail, body, previous=None):
-    atomic_write(detail, body)
-    try:
-        save_index(index, data)
-    except OSError:
-        if previous is None:
-            detail.unlink()
-        else:
-            atomic_write(detail, previous)
-        raise
+def file_body(path):
+    return path.read_bytes().decode("utf-8") if path.exists() else None
+
+
+def recover_write(root):
+    journal = path_in(root, PENDING)
+    if not journal.exists():
+        return False
+    pending = read_object(journal)
+    index = path_in(root, INDEX)
+    updated_index = parse_object(pending["after"], index)
+    validate_index(root, updated_index)
+    if "revision" in updated_index:
+        raise ValueError("该索引由任务服务维护，请通过正式任务来源更新。")
+    if file_body(index) not in (pending["before"], pending["after"]):
+        raise ValueError("索引已被其他写入者修改，需核对待恢复记录。")
+    allowed = {path_in(root, updated_index["entry_path"])}
+    allowed.update(path_in(root, task["detail_path"]) for task in updated_index["tasks"] if "detail_path" in task)
+    files = [
+        (path_in(root, item["path"]), item["before"], item["after"])
+        for item in pending["files"]
+    ]
+    if len({path for path, _, _ in files}) != len(files):
+        raise ValueError("待恢复记录包含重复路径。")
+    for path, before, after in files:
+        if path not in allowed:
+            raise ValueError(f"待恢复记录包含未知文件：{path.relative_to(root)}")
+        if file_body(path) not in (before, after):
+            raise ValueError(f"待恢复文件已变化：{path.relative_to(root)}")
+    for path, _, after in files:
+        if file_body(path) != after:
+            atomic_write(path, after)
+    if file_body(index) not in (pending["before"], pending["after"]):
+        raise ValueError("索引已被其他写入者修改，需核对待恢复记录。")
+    if file_body(index) != pending["after"]:
+        atomic_write(index, pending["after"])
+    journal.unlink()
+    return True
+
+
+def commit_index(root, before, after, files=()):
+    index = path_in(root, INDEX)
+    if file_body(index) != before:
+        raise ValueError("索引已变化，请重新读取后重试。")
+    if not files:
+        atomic_write(index, after)
+        return
+    pending = {
+        "before": before,
+        "after": after,
+        "files": [
+            {"path": path.relative_to(root).as_posix(), "before": original, "after": body}
+            for path, original, body in files
+        ],
+    }
+    atomic_write(path_in(root, PENDING), json.dumps(pending, ensure_ascii=False))
+    recover_write(root)
 
 
 def next_task_id(root, tasks):
@@ -160,10 +250,16 @@ def next_task_id(root, tasks):
 def write_lock(root):
     directory = path_in(root, "management")
     directory.mkdir(exist_ok=True)
-    path = path_in(root, "management/.project-init.lock")
-    with path.open("a") as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
-        yield
+    path = path_in(root, LOCK)
+    if len({path, path_in(root, INDEX), path_in(root, PENDING)}) != 3:
+        raise ValueError("本地管理文件路径冲突。")
+    with path.open("a+b") as handle:
+        if os.name == "nt":
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+        yield recover_write(root)
 
 
 def validate_index(root, data):
@@ -177,7 +273,12 @@ def validate_index(root, data):
     entries = data.get("tasks")
     if not isinstance(entries, list):
         raise ValueError("tasks 必须是数组。")
-    task_ids = set()
+    task_ids, request_ids = set(), set()
+    entry = path_in(root, data["entry_path"])
+    reserved = {path_in(root, name) for name in (INDEX, LOCK, PENDING)}
+    if entry in reserved:
+        raise ValueError("项目入口与管理文件冲突。")
+    details = reserved | {entry}
     for task in entries:
         if not isinstance(task, dict):
             raise ValueError("每条任务必须是对象。")
@@ -185,18 +286,29 @@ def validate_index(root, data):
         if not isinstance(task_id, str) or not task_id.strip() or task_id in task_ids:
             raise ValueError("任务 ID 缺失或重复。")
         task_ids.add(task_id)
-        if not task.get("title") or task.get("status") not in TASK_STATES:
+        if not isinstance(task.get("title"), str) or not task["title"].strip() or task.get("status") not in TASK_STATES:
             raise ValueError(f"任务标题或状态无效：{task_id}")
+        if "request_id" in task:
+            request_id = task["request_id"]
+            if not isinstance(request_id, str) or not request_id.strip() or request_id in request_ids:
+                raise ValueError(f"请求编号无效或重复：{task_id}")
+            request_ids.add(request_id)
         for field in ("detail_path", "target_path"):
             if field in task:
-                path_in(root, task[field])
+                path = path_in(root, task[field])
+                if field == "detail_path":
+                    if path in details:
+                        raise ValueError(f"任务详情路径冲突：{task_id} {task[field]}")
+                    details.add(path)
+                expected = Path.is_file if field == "detail_path" else Path.is_dir
+                if path.exists() and not expected(path):
+                    raise ValueError(f"任务路径类型不符：{task_id} {task[field]}")
     next_id = data.get("next_task_id")
     if next_id is not None and not any(
         task["id"] == next_id and task["status"] in {"todo", "in_progress"}
         for task in entries
     ):
         raise ValueError("next_task_id 应指向可推进的任务，或设为 null。")
-    path_in(root, data["entry_path"])
 
 
 def apply(root, plan, dry_run):
@@ -205,7 +317,8 @@ def apply(root, plan, dry_run):
     if plan.get("public_repo") is True and git_root(root):
         raise ValueError("请在公开仓库外、且包含工程的项目管理根目录应用。")
     index = path_in(root, INDEX)
-    original = read_object(index) if index.exists() else {}
+    before = file_body(index)
+    original = parse_object(before, index) if before is not None else {}
     if original and "schema_version" in original and original["schema_version"] != 1:
         raise ValueError("索引版本未知，请先按看板接口核对。")
     data = dict(original)
@@ -267,15 +380,17 @@ def apply(root, plan, dry_run):
     if data != original or not data.get("updated_at"):
         if "revision" in original:
             raise ValueError("这个项目已有任务服务版本记录，请通过正式任务来源更新索引。")
-        data["updated_at"] = now()
-        writes[index] = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+        writes[index] = index_body(data)
     if not dry_run:
         for directory in dirs:
             directory.mkdir(parents=True, exist_ok=True)
-        for path, content in writes.items():
+        for path in writes:
             if path != index and path.exists():
                 raise ValueError(f"文件已存在，请重新读取：{path.relative_to(root)}")
-            atomic_write(path, content)
+        if writes:
+            after = writes.get(index, before)
+            files = [(path, None, body) for path, body in writes.items() if path != index]
+            commit_index(root, before, after, files)
     return {
         "dry_run": dry_run,
         "directories": [p.relative_to(root).as_posix() for p in dirs],
@@ -290,13 +405,13 @@ def apply(root, plan, dry_run):
     }
 
 
-def read_task(root, task_id):
+def read_task(root, task_id, metadata_only=False):
     data = read_object(path_in(root, INDEX))
     validate_index(root, data)
     for task in data["tasks"]:
         if task["id"] == task_id:
             result = {"project_id": data["project_id"], "entry_path": data["entry_path"], "task": task}
-            if "detail_path" in task:
+            if "detail_path" in task and not metadata_only:
                 result["detail"] = path_in(root, task["detail_path"]).read_text(encoding="utf-8")
             return result
     raise ValueError(f"项目中找不到任务：{task_id}")
@@ -304,26 +419,37 @@ def read_task(root, task_id):
 
 def read_local_index(root):
     index = path_in(root, INDEX)
-    data = read_object(index)
+    before = index.read_bytes().decode("utf-8")
+    data = parse_object(before, index)
     validate_index(root, data)
     if "revision" in data:
         raise ValueError("这个项目已有任务服务版本记录，请通过正式任务来源更新。")
-    return index, data
+    return before, data
 
 
-def add_task(root, title, scope, acceptance, target):
+def add_task(root, title, scope, acceptance, target, request_id=None):
     title, scope, acceptance, target = (value.strip() for value in (title, scope, acceptance, target))
     if not all((title, scope, acceptance)):
         raise ValueError("请填写任务标题、范围和验收条件。")
     if not path_in(root, target).is_dir():
         raise ValueError(f"找不到任务工作目录：{target}")
-    index, data = read_local_index(root)
+    before, data = read_local_index(root)
+    if request_id is not None:
+        request_id = request_id.strip()
+        if not request_id:
+            raise ValueError("请求编号不能为空。")
+        previous = next((task for task in data["tasks"] if task.get("request_id") == request_id), None)
+        if previous:
+            if previous["title"] != title or previous.get("target_path") != target:
+                raise ValueError("该请求编号已用于另一项任务。")
+            return previous
     content = {"title": title, "scope": scope, "acceptance": acceptance}
     for existing in data["tasks"]:
         if existing["title"] != title:
             continue
         existing_detail = existing.get("detail_path")
-        if existing_detail and existing.get("target_path") == target:
+        same_target = existing_detail and existing.get("target_path") == target
+        if request_id is None and existing["status"] != "cancelled" and same_target:
             detail = path_in(root, existing_detail)
             expected = task_body(existing["id"], content, target)
             if detail.is_file() and detail.read_text(encoding="utf-8").startswith(expected):
@@ -337,9 +463,34 @@ def add_task(root, title, scope, acceptance, target):
         "id": task_id, "title": title, "status": "todo", "target_path": target,
         "detail_path": detail_path, "created_at": now(),
     }
+    if request_id is not None:
+        task["request_id"] = request_id
     data["tasks"].append(task)
     validate_index(root, data)
-    save_task_detail(index, data, path_in(root, detail_path), task_body(task_id, content, target))
+    commit_index(root, before, index_body(data), [(path_in(root, detail_path), None, task_body(task_id, content, target))])
+    return task
+
+
+def amend_task(root, task_id, scope, acceptance):
+    scope, acceptance = scope.strip(), acceptance.strip()
+    if not scope or not acceptance:
+        raise ValueError("请填写更新后的范围和验收条件。")
+    before, data = read_local_index(root)
+    task = next((item for item in data["tasks"] if item["id"] == task_id), None)
+    if task is None:
+        raise ValueError(f"项目中找不到任务：{task_id}")
+    if "detail_url" in task:
+        raise ValueError("请通过外部任务来源更新此任务。")
+    if task["status"] in {"done", "cancelled"}:
+        raise ValueError("已结束的任务保留原记录，请登记后续任务。")
+    if "detail_path" not in task:
+        raise ValueError("请先为任务补齐详情路径。")
+    detail = path_in(root, task["detail_path"])
+    body = detail.read_bytes().decode("utf-8")
+    amendment = f"## 需求更新\n\n工作范围：{scope}\n\n验收条件：{acceptance}"
+    if not body.rstrip().endswith(amendment):
+        updated = f"{body.rstrip()}\n\n{amendment}\n"
+        commit_index(root, before, index_body(data), [(detail, body, updated)])
     return task
 
 
@@ -348,7 +499,7 @@ def defer_task(root, task_id, title, reason, resume_when, record_path):
     if not reason or not resume_when:
         raise ValueError("请填写搁置原因和恢复条件。")
     record = record_path.read_text(encoding="utf-8").strip() if record_path else ""
-    index, data = read_local_index(root)
+    before, data = read_local_index(root)
 
     if task_id is not None:
         matches = [task for task in data["tasks"] if task["id"] == task_id]
@@ -379,7 +530,7 @@ def defer_task(root, task_id, title, reason, resume_when, record_path):
             raise ValueError("请为此任务指定项目内的 detail_path。")
         detail_path = f"management/tasks/{task['id']}.md"
     detail = path_in(root, detail_path)
-    if task.get("detail_path") and not detail.is_file():
+    if (task.get("detail_path") or detail.exists()) and not detail.is_file():
         raise ValueError(f"找不到任务详情：{detail_path}")
     original = detail.read_bytes().decode("utf-8") if detail.exists() else None
     body = original if original is not None else (
@@ -395,61 +546,90 @@ def defer_task(root, task_id, title, reason, resume_when, record_path):
 
     task.update(status="blocked", detail_path=detail_path, blocked_reason=reason)
     task.pop("run_id", None)
-    if data["next_task_id"] == task["id"]:
+    if data.get("next_task_id") == task["id"]:
         data["next_task_id"] = None
     validate_index(root, data)
-    save_task_detail(index, data, detail, f"{body.rstrip()}\n\n### {now()} · 搁置\n\n{summary}\n", original)
+    updated = f"{body.rstrip()}\n\n### {now()} · 搁置\n\n{summary}\n"
+    commit_index(root, before, index_body(data), [(detail, original, updated)])
     return task
 
 
 def update_lifecycle(root, action):
+    before, data = read_local_index(root)
     result = inspect(root)
     if result["issues"]:
         raise ValueError("\n".join(result["issues"]))
-    data = result["index"]
-    if "revision" in data:
-        raise ValueError("这个项目已有任务服务版本记录，请通过正式任务来源更新。")
-
     current = data["status"], data["stage"]
     if action == "closeout":
         if data["status"] == "cancelled":
             raise ValueError("已取消的项目应保留取消状态。")
+        open_ids = [task["id"] for task in data["tasks"] if task["status"] in {"todo", "in_progress"}]
+        if open_ids:
+            raise ValueError(f"请先完成、搁置或取消未结束任务：{', '.join(open_ids)}")
         new = "completed", "结项与归档"
     else:
         new = "active", "项目重启"
         if data["status"] != "completed" and current != new:
             raise ValueError("只有已结项的项目适用重启。")
 
-    if current != new or (action == "closeout" and data["next_task_id"] is not None):
+    if current != new or (action == "closeout" and data.get("next_task_id") is not None):
         data["status"], data["stage"] = new
         if action == "closeout":
             data["next_task_id"] = None
-        save_index(path_in(root, INDEX), data)
+        commit_index(root, before, index_body(data))
     return data
 
 
 def update_task(root, task_id, action, run_id, record_path, reason):
-    index, data = read_local_index(root)
+    before, data = read_local_index(root)
     task = next((item for item in data["tasks"] if item["id"] == task_id), None)
     if task is None:
         raise ValueError(f"项目中找不到任务：{task_id}")
     if "detail_url" in task:
         raise ValueError("请通过外部任务来源更新此任务。")
+    if action in {"start", "resume-task"} and data["status"] in {"completed", "cancelled"}:
+        raise ValueError("请先重启已结项项目或核对取消状态。")
+    if action == "resume-task":
+        if task["status"] == "todo":
+            return task
+        if task["status"] != "blocked":
+            raise ValueError(f"只有阻塞任务可以恢复，当前状态：{task['status']}")
+        previous_reason = task.pop("blocked_reason", None)
+        task["status"] = "todo"
+        task.pop("run_id", None)
+        files = []
+        if "detail_path" in task or previous_reason:
+            if "detail_path" not in task:
+                if not re.fullmatch(r"[A-Za-z0-9_-]+", task_id):
+                    raise ValueError("请先为任务补齐详情路径。")
+                task["detail_path"] = f"management/tasks/{task_id}.md"
+                validate_index(root, data)
+            detail = path_in(root, task["detail_path"])
+            body = file_body(detail)
+            history = body if body is not None else f"# {task_id} {task['title']}\n\n## 执行记录\n"
+            note = f"\n\n### {now()} · 恢复待办\n"
+            if previous_reason:
+                note += f"\n原阻塞原因：{previous_reason}\n"
+            files.append((detail, body, history.rstrip() + note))
+        commit_index(root, before, index_body(data), files)
+        return task
     if action == "start":
         if task["status"] != "todo":
             raise ValueError(f"只有待办任务可以开始，当前状态：{task['status']}")
+        files = []
         if "detail_path" not in task:
             if not re.fullmatch(r"[A-Za-z0-9_-]+", task_id):
                 raise ValueError("请为此任务指定项目内的 detail_path。")
             detail_path = f"management/tasks/{task_id}.md"
             detail = path_in(root, detail_path)
             if not detail.exists():
-                atomic_write(detail, f"# {task_id} {task['title']}\n\n## 执行记录\n")
+                files.append((detail, None, f"# {task_id} {task['title']}\n\n## 执行记录\n"))
             task["detail_path"] = detail_path
-        if not path_in(root, task["detail_path"]).is_file():
+        validate_index(root, data)
+        if not files and not path_in(root, task["detail_path"]).is_file():
             raise ValueError(f"找不到任务详情：{task['detail_path']}")
         task.update(status="in_progress", run_id=uuid4().hex)
-        save_index(index, data)
+        commit_index(root, before, index_body(data), files)
         return task
 
     status = "done" if action == "finish" else "blocked"
@@ -467,20 +647,26 @@ def update_task(root, task_id, action, run_id, record_path, reason):
     if not record or (status == "blocked" and not (reason or "").strip()):
         raise ValueError("执行记录和适用的阻塞原因不能为空。")
     detail = path_in(root, task["detail_path"])
-    body = detail.read_text(encoding="utf-8")
+    body = detail.read_bytes().decode("utf-8")
     marker = f"<!-- task-run:{run_id}:{status} -->"
     timestamp = now()
+    files = []
     if marker not in body.splitlines():
         result = f"阻塞原因：{reason.strip()}\n\n" if status == "blocked" else ""
-        atomic_write(detail, f"{body.rstrip()}\n\n### {timestamp}\n\n{marker}\n\n{result}{record}\n")
+        updated = f"{body.rstrip()}\n\n### {timestamp}\n\n{marker}\n\n{result}{record}\n"
+        files.append((detail, body, updated))
+    elif status == "blocked":
+        recorded = f"{marker}\n\n阻塞原因：{reason.strip()}\n\n{record}\n"
+        if recorded not in body.replace("\r\n", "\n"):
+            raise ValueError("已有未提交的阻塞记录，请用原原因和记录重试。")
     task["status"] = status
     if status == "done":
         task["completed_at"] = timestamp
     else:
         task["blocked_reason"] = reason.strip()
-    if data["next_task_id"] == task_id:
+    if data.get("next_task_id") == task_id:
         data["next_task_id"] = None
-    save_index(index, data)
+    commit_index(root, before, index_body(data), files)
     return task
 
 
@@ -488,6 +674,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("inspect").add_argument("root", type=Path)
+    sub.add_parser("status", help="显示项目及任务统计").add_argument("root", type=Path)
+    sub.add_parser("recover", help="恢复中断的本地写入").add_argument("root", type=Path)
     apply_parser = sub.add_parser("apply")
     apply_parser.add_argument("root", type=Path)
     apply_parser.add_argument("plan", type=Path)
@@ -495,12 +683,19 @@ def main():
     task_parser = sub.add_parser("task")
     task_parser.add_argument("root", type=Path)
     task_parser.add_argument("task_id")
+    task_parser.add_argument("--metadata-only", action="store_true")
     add_parser = sub.add_parser("add-task", help="登记项目需求并生成待办")
     add_parser.add_argument("root", type=Path)
     add_parser.add_argument("--title", required=True)
     add_parser.add_argument("--scope", required=True)
     add_parser.add_argument("--acceptance", required=True)
     add_parser.add_argument("--target-path", default="work/")
+    add_parser.add_argument("--request-id")
+    amend_parser = sub.add_parser("amend-task", help="补充同一任务的范围与验收条件")
+    amend_parser.add_argument("root", type=Path)
+    amend_parser.add_argument("task_id")
+    amend_parser.add_argument("--scope", required=True)
+    amend_parser.add_argument("--acceptance", required=True)
     defer_parser = sub.add_parser("defer", help="记录搁置决定并更新看板索引")
     defer_parser.add_argument("root", type=Path)
     selector = defer_parser.add_mutually_exclusive_group(required=True)
@@ -511,11 +706,11 @@ def main():
     defer_parser.add_argument("--record", type=Path)
     for action in ("closeout", "reopen"):
         sub.add_parser(action).add_argument("root", type=Path)
-    for action in ("start", "finish", "block"):
+    for action in ("start", "resume-task", "finish", "block"):
         update = sub.add_parser(action)
         update.add_argument("root", type=Path)
         update.add_argument("task_id")
-        if action != "start":
+        if action in {"finish", "block"}:
             update.add_argument("run_id")
             update.add_argument("--record", required=True, type=Path)
         if action == "block":
@@ -527,8 +722,16 @@ def main():
             raise ValueError("项目根目录必须是目录。")
         if args.command == "inspect":
             result = inspect(root)
+        elif args.command == "status":
+            result = project_status(root)
+        elif args.command == "recover":
+            with write_lock(root) as recovered:
+                result = {"recovered": recovered}
         elif args.command == "apply":
             plan = read_object(args.plan)
+            if path_in(root, PENDING).exists() and not args.dry_run:
+                with write_lock(root):
+                    pass
             preview = apply(root, plan, True)
             if args.dry_run or not (preview["directories"] or preview["files"]):
                 result = preview
@@ -538,10 +741,13 @@ def main():
                     result = apply(root, plan, False)
                 result["new_runtime_files"] = preview["new_runtime_files"]
         elif args.command == "task":
-            result = read_task(root, args.task_id)
+            result = read_task(root, args.task_id, args.metadata_only)
         elif args.command == "add-task":
             with write_lock(root):
-                result = add_task(root, args.title, args.scope, args.acceptance, args.target_path)
+                result = add_task(root, args.title, args.scope, args.acceptance, args.target_path, args.request_id)
+        elif args.command == "amend-task":
+            with write_lock(root):
+                result = amend_task(root, args.task_id, args.scope, args.acceptance)
         elif args.command == "defer":
             with write_lock(root):
                 result = defer_task(

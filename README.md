@@ -47,7 +47,11 @@ python3 scripts/project_init.py task "$demo_dir" T001
 
 管理真实项目时，先按[初始化流程](references/Project_Initialization.md#初始化或接入的操作步骤)准备项目自己的计划。
 
-项目任务索引保存在项目自己的 `management/project.json`，可供兼容的看板读取。字段和操作约定见[看板接口文档](references/Project_Dashboard_Interface.md)。
+## 搭配 agent-kanban 使用
+
+用本技能初始化或接入项目后，可以在 [agent-kanban](https://github.com/Selwiro/agent-kanban) 中导入包含 `management/project.json` 的项目目录，在网页上查看进度或新建任务。把任务编号交给对应项目的 AI 助手，待助手写回执行结果后，点击看板上的「刷新数据」查看。
+
+字段和操作约定见[看板接口文档](references/Project_Dashboard_Interface.md)。
 
 ## 许可证
 

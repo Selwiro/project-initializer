@@ -1,0 +1,4 @@
+interface:
+  display_name: "项目初始化"
+  short_description: "初始化和接入项目、执行看板任务，并办理结项、归档迁移与重启"
+  default_prompt: "用 $project-initializer 初始化当前项目，沿用已有工程和项目入口。"

@@ -1,0 +1,21 @@
+{
+  "name": "演示账本",
+  "type": "programming",
+  "summary": "实现可按月核对支出的账本。",
+  "stage": "初始化与计划",
+  "status": "active",
+  "entry_path": "README.md",
+  "target_path": "work/android/",
+  "create_target": true,
+  "task_source": "local",
+  "push_mode": "本地专用，禁止推送",
+  "run_command": "待 Android 工程生成后补充",
+  "verify_command": "待 Android 工程生成后补充",
+  "scope": "先完成 Android 月报原型。",
+  "acceptance": "能切换月份并核对支出合计。",
+  "first_task": {
+    "title": "确认月报统计口径",
+    "scope": "核对月份边界和纳入汇总的交易类型。",
+    "acceptance": "形成可用于测试的统计规则。"
+  }
+}
